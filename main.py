@@ -1,10 +1,13 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+# Standard library
 import sqlite3
-from openai import OpenAI
 import json
 import os
+from datetime import date
 
+# Third-party packages
+from openai import OpenAI
+from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException
 app = FastAPI()
 
 connection = sqlite3.connect(
@@ -16,16 +19,20 @@ cursor = connection.cursor()
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS assignments (
                id INTEGER PRIMARY KEY AUTOINCREMENT,
-               module TEXT,
-               title TEXT,
-               completed BOOLEAN)
+               module TEXT NOT NULL,
+               title TEXT NOT NULL,
+               due_date TEXT,
+               status TEXT NOT NULL,
+               notes TEXT)
  """)
 connection.commit()
 
 class Assignment(BaseModel):
     module: str
     title: str
-    completed: bool
+    due_date: date | None
+    status: str 
+    notes: str | None
 
 class ChatRequest(BaseModel):
     message: str
@@ -45,20 +52,22 @@ def get_assignments():
             "id" : row[0],
             "module" : row[1],
             "title" : row[2],
-            "completed" : bool(row[3])
+            "due_date" : row[3],
+            "status" : row[4],
+            "notes" : row[5]
         })
     return result
 
 
 @app.post("/assignments")
 def create_assignment(assignment : Assignment):
-    insert_assignment(assignment.module, assignment.title, assignment.completed)
+    insert_assignment(assignment.module, assignment.title, assignment.due_date, assignment.status, assignment.notes)
     return assignment.model_dump()
 
 @app.put("/assignments/{id}")
 def update_assignment(id: int, assignment : Assignment):
     
-    update_assignment_db(id, assignment.module, assignment.title, assignment.completed)
+    update_assignment_db(id, assignment.module, assignment.title, assignment.due_date, assignment.status, assignment.notes)
     if cursor.rowcount == 0:
         raise HTTPException(
             status_code = 404,
@@ -82,19 +91,19 @@ def fetch_assignments():
     rows = cursor.fetchall()
     return rows
 
-def insert_assignment(module: str, title: str, completed: bool):
+def insert_assignment(module: str, title: str, due_date: date | None, status: str, notes: str | None):
     cursor.execute("""
-    INSERT INTO assignments (module, title, completed)
-    VALUES (?, ?, ?)
-     """, (module, title, completed))
+    INSERT INTO assignments (module, title, due_date, status, notes)
+    VALUES (?, ?, ?, ?, ?)
+     """, (module, title, due_date, status, notes))
     connection.commit()
 
-def update_assignment_db(id: int, module: str, title: str, completed: bool):
+def update_assignment_db(id: int, module: str, title: str, due_date: date | None, status: str, notes:str | None):
     cursor.execute("""
     UPDATE assignments
-    SET module = ?, title = ?, completed = ?
+    SET module = ?, title = ?, due_date = ?, status = ?, notes = ?
     WHERE id = ?
-     """, (module, title, completed, id))
+     """, (module, title, due_date, status, notes, id))
     
     connection.commit()
 
@@ -109,7 +118,7 @@ tools = [
     {
         "type": "function",
         "name": "get_assignments",
-        "description": "Returns all assignments from the SQLite database including module, title, and completion status. Use this whenever the user asks about assignments. ",
+        "description": "Returns all assignments from the SQLite database including module, title, due date, status, and notes. Use this whenever the user asks about assignments. ",
         "parameters": {
             "type": "object",
             "properties" : {},
@@ -119,7 +128,7 @@ tools = [
     {
         "type": "function",
         "name": "create_assignment",
-        "description": "Creates a new assignment with a module, title, and completion status.",
+        "description": "Creates a new assignment with a module, title, due date, status, and notes",
         "parameters": {
             "type": "object",
             "properties": {
@@ -129,14 +138,20 @@ tools = [
                 "title" : {
                     "type": "string"
                 },
-                "completed" : {
-                    "type": "boolean"
+                "due_date" : {
+                    "type": "string"
+                },
+                "status" : {
+                    "type" : "string"
+                },
+                "notes" : {
+                    "type" : "string"
                 }
             },
             "required": [
                 "module",
                 "title",
-                "completed"
+                "status",
             ]
         }
     },
@@ -159,7 +174,7 @@ tools = [
     {
         "type": "function",
         "name": "update_assignment",
-        "description": "Updates an existing assignment using its ID, module, title, and completion status.",
+        "description": "Updates an existing assignment using its ID, module, title, due date, status, notes.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -172,15 +187,21 @@ tools = [
                 "title": {
                     "type": "string"
                 },
-                "completed" : {
-                    "type": "boolean"
+                "due_date": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "notes": {
+                    "type": "string"
                 }
             },
              "required": [
             "id",
             "module", 
             "title", 
-            "completed"
+            "status"
         ]
         },
     }
@@ -212,7 +233,7 @@ def chat(request: ChatRequest):
     
         if tool_call is None:
             return {
-                "response": response.output_text=[]
+                "response": response.output_text
         }
 
         tool_name = tool_call.name
