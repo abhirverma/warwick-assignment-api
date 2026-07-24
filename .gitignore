@@ -3,3 +3,4 @@ __pycache__/
 assignments.db
 .venv/
 .env
+.vscode/
