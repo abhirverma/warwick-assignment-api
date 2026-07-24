@@ -33,9 +33,12 @@ Tool Usage:
 
 Communication Style:
 - Be friendly, professional, encouraging, and respectful.
-- Be truthful, accurate, and concise while still providing enough detail to be useful.
-- Explain your reasoning whenever you recommend priorities or suggest a plan.
-- Provide practical and actionable advice rather than generic statements.
+- Keep responses concise and easy to scan.
+- Answer the user's question directly before providing additional recommendations.
+- Explain your reasoning briefly rather than writing long paragraphs.
+- Use headings and bullet points where helpful.
+- Avoid unnecessary repetition.
+- Only provide detailed study plans if the user explicitly asks for them.
 
 Decision Making:
 When helping students prioritise assignments or plan their workload, consider factors such as:
@@ -47,9 +50,14 @@ When helping students prioritise assignments or plan their workload, consider fa
 - Any other relevant assignment information retrieved from the database.
 
 Formatting:
-- Use Markdown tables when presenting multiple assignments or structured information.
-- Use bullet points or numbered lists for recommendations, study plans, or multiple suggestions.
-- Present information clearly and avoid returning raw database records or Python objects.
+- Use simple, clean formatting.
+- Use at most one heading unless the user requests a detailed plan.
+- Prefer short bullet points over long paragraphs.
+- Avoid excessive Markdown. Use bold only to highlight the most important information.
+- Highlight only the most important information.
+- Never return raw database records or Python objects.
+- Use plain text with bullet points where possible. Avoid Markdown headings (#, ##) unless the user explicitly requests a formatted report.
+- When answering factual questions, avoid conversational sentences when a short label and bullet points communicate the answer more clearly.
 
 Boundaries:
 - Do not hallucinate or fabricate information.
@@ -57,18 +65,34 @@ Boundaries:
 - You may provide general study or time management advice using your own knowledge when it does not depend on assignment-specific information.
 - If a user's request is unrelated to assignments, answer normally if appropriate, without unnecessarily using tools.
 
+Response Length:
+- Keep answers proportional to the user's request.
+- For simple questions, answer in fewer than 100 words.
+- For recommendation questions, provide the answer first, followed by a brief explanation.
+- Only include additional recommendations if they clearly add value.
+- Do not create full study schedules unless explicitly requested.
+- Avoid repeating information.
+
+Response Priorities:
+- Answer the user's question immediately.
+- Do not include introductory or concluding paragraphs.
+- Do not explain your reasoning unless it helps answer the question.
+- Keep responses easy to scan.
+- Prefer concise, natural language over highly formatted Markdown.
+- For direct questions, give the answer first, then include only the minimum supporting details needed.
+
 Goal:
 Your objective is not only to answer questions, but to help students make informed, organised, and confident decisions about managing their academic workload.
 """
 
-connection = sqlite3.connect(
-    "assignments.db",
-    check_same_thread=False
-)
+def get_connection():
+    return sqlite3.connect("assignments.db")
 load_dotenv()
+
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-cursor = connection.cursor()
-cursor.execute("""
+startup_connection = get_connection()
+startup_cursor = startup_connection.cursor()
+startup_cursor.execute("""
 CREATE TABLE IF NOT EXISTS assignments (
                id INTEGER PRIMARY KEY AUTOINCREMENT,
                module TEXT NOT NULL,
@@ -77,7 +101,8 @@ CREATE TABLE IF NOT EXISTS assignments (
                status TEXT NOT NULL,
                notes TEXT)
  """)
-connection.commit()
+startup_connection.commit()
+startup_connection.close()
 
 class Assignment(BaseModel):
     module: str
@@ -96,6 +121,8 @@ def home():
 
 @app.get("/assignments")
 def get_assignments(status = None, module = None):
+    connection = get_connection()
+    cursor = connection.cursor()
     conditions = []
     parameters = []
     if status:
@@ -111,6 +138,7 @@ def get_assignments(status = None, module = None):
 
     cursor.execute(query, parameters)
     rows = cursor.fetchall()
+    connection.close()
     result = []
     for row in rows: 
         result.append({
@@ -132,8 +160,8 @@ def create_assignment(assignment : Assignment):
 @app.put("/assignments/{id}")
 def update_assignment(id: int, assignment : Assignment):
     
-    update_assignment_db(id, assignment.module, assignment.title, assignment.due_date, assignment.status, assignment.notes)
-    if cursor.rowcount == 0:
+    rows_updated = update_assignment_db(id, assignment.module, assignment.title, assignment.due_date, assignment.status, assignment.notes)
+    if rows_updated == 0:
         raise HTTPException(
             status_code = 404,
             detail = "Assignment not found"
@@ -142,8 +170,8 @@ def update_assignment(id: int, assignment : Assignment):
 
 @app.delete("/assignments/{id}")
 def delete_assignment(id: int):
-    delete_assignment_db(id)
-    if cursor.rowcount == 0:
+    rows_updated = delete_assignment_db(id)
+    if rows_updated == 0:
         raise HTTPException(
             status_code=404,
             detail="Assignment not found"
@@ -153,27 +181,38 @@ def delete_assignment(id: int):
 
 
 def insert_assignment(module: str, title: str, due_date: date | None, status: str, notes: str | None):
+    connection = get_connection()
+    cursor = connection.cursor()
     cursor.execute("""
     INSERT INTO assignments (module, title, due_date, status, notes)
     VALUES (?, ?, ?, ?, ?)
      """, (module, title, due_date, status, notes))
     connection.commit()
+    connection.close()
 
 def update_assignment_db(id: int, module: str, title: str, due_date: date | None, status: str, notes:str | None):
+    connection = get_connection()
+    cursor = connection.cursor()
     cursor.execute("""
     UPDATE assignments
     SET module = ?, title = ?, due_date = ?, status = ?, notes = ?
     WHERE id = ?
      """, (module, title, due_date, status, notes, id))
-    
     connection.commit()
+    rowcount = cursor.rowcount
+    connection.close()
+    return rowcount
 
 def delete_assignment_db(id: int):
+    connection = get_connection()
+    cursor = connection.cursor()
     cursor.execute("DELETE FROM assignments WHERE id = ?", 
     (id,)
     )
     connection.commit()
-    
+    rowcount = cursor.rowcount
+    connection.close()
+    return rowcount
 
 tools = [
     {
@@ -292,10 +331,9 @@ def chat(request: ChatRequest):
             input = request.message,
             tools = tools
         )
-        
-    print(response)
 
-    while True:
+    MAX_TOOL_CALLS = 5
+    for _ in range(MAX_TOOL_CALLS):
         tool_call = None
         for item in response.output:
             if item.type == "function_call":
@@ -307,12 +345,16 @@ def chat(request: ChatRequest):
                 "response": response.output_text
         }
 
-        tool_name = tool_call.name
-        call_id = tool_call.call_id
-        arguments = json.loads(tool_call.arguments)
-        function = tool_functions[tool_name]
-        print(arguments)
-        result = function(**arguments)
+        try:
+            tool_name = tool_call.name
+            call_id = tool_call.call_id
+            arguments = json.loads(tool_call.arguments)
+            function = tool_functions[tool_name]
+            result = function(**arguments)
+        except Exception: 
+            return {
+            "response": "Sorry, an error occurred while executing the requested action."
+        }
         response = client.responses.create(
             model = "gpt-5.5",
             instructions = SYSTEM_PROMPT,
@@ -326,7 +368,6 @@ def chat(request: ChatRequest):
                 }
             ]
         )
-        print("\nAfter tool output:\n")
-        print(response)
-
-        continue
+    return {
+        "response": "I couldn't complete your request because the maximum number of tool calls was reached. Please try again."
+    }
